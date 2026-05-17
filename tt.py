@@ -1,4 +1,5 @@
 import warnings
+from io import BytesIO
 from math import pi
 
 import matplotlib.lines as mlines
@@ -213,19 +214,24 @@ def init_session_state():
             st.session_state[key] = value
 
 
-def load_data(uploaded_file):
-    file_name = getattr(uploaded_file, "name", "")
+@st.cache_data(show_spinner=False)
+def load_data_from_bytes(file_bytes, file_name):
     file_suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
 
-    try:
-        if file_suffix in ["xlsx", "xls"]:
-            return pd.read_excel(uploaded_file)
+    if file_suffix in ["xlsx", "xls"]:
+        return pd.read_excel(BytesIO(file_bytes))
 
-        try:
-            return pd.read_csv(uploaded_file, encoding="gbk")
-        except UnicodeDecodeError:
-            uploaded_file.seek(0)
-            return pd.read_csv(uploaded_file, encoding="utf-8-sig")
+    try:
+        return pd.read_csv(BytesIO(file_bytes), encoding="gbk")
+    except UnicodeDecodeError:
+        return pd.read_csv(BytesIO(file_bytes), encoding="utf-8-sig")
+
+
+def load_data(uploaded_file):
+    file_name = getattr(uploaded_file, "name", "")
+
+    try:
+        return load_data_from_bytes(uploaded_file.getvalue(), file_name)
     except Exception as exc:
         st.error(f"文件读取失败：{exc}")
         st.info("请确认文件格式为 CSV、XLSX 或 XLS；CSV 建议使用 GBK 或 UTF-8 编码。")
@@ -272,6 +278,11 @@ def preprocess_data(df):
                 logs.append(f"{col}: 删除 {removed_count} 行非负值数据")
 
     return df_processed, logs
+
+
+@st.cache_data(show_spinner=False)
+def preprocess_data_cached(df):
+    return preprocess_data(df)
 
 
 def calculate_score(value, rule):
@@ -358,6 +369,11 @@ def score_dataset(df):
     return df_scored, score_columns, total_possible_score, available_rules
 
 
+@st.cache_data(show_spinner=False)
+def score_dataset_cached(df):
+    return score_dataset(df)
+
+
 def prepare_rule_check_data(df, use_full_preprocess=False, auto_normalize=True):
     if use_full_preprocess:
         return preprocess_data(df)
@@ -394,6 +410,11 @@ def prepare_rule_check_data(df, use_full_preprocess=False, auto_normalize=True):
     return df_checked, logs
 
 
+@st.cache_data(show_spinner=False)
+def prepare_rule_check_data_cached(df, use_full_preprocess=False, auto_normalize=True):
+    return prepare_rule_check_data(df, use_full_preprocess, auto_normalize)
+
+
 def score_and_classify_rule_data(df):
     df_result = df.copy()
     available_rules = {}
@@ -414,6 +435,11 @@ def score_and_classify_rule_data(df):
         df_result["总得分率"] = 0
 
     return df_result, available_rules, score_columns, total_possible_score
+
+
+@st.cache_data(show_spinner=False)
+def score_and_classify_rule_data_cached(df):
+    return score_and_classify_rule_data(df)
 
 
 def build_rule_check_summary(df_result, scoring_rules):
@@ -767,6 +793,8 @@ def render_external_rule_checker():
     st.caption("上传包含任意固定规则字段的数据文件，即可按当前静态规则输出绿色、蓝色、橙色区间和得分。")
 
     checker_file = st.file_uploader("上传待判定文件", type=["csv", "xlsx", "xls"], key="external_rule_checker_file")
+    if checker_file is not None:
+        st.caption(f"当前文件大小：{checker_file.size / 1024 / 1024:.2f} MB。大文件建议优先使用 CSV，通常比 Excel 快很多。")
     c1, c2 = st.columns(2)
     with c1:
         use_full_preprocess = st.checkbox("套用完整QAR预处理逻辑", value=False, key="external_full_preprocess")
@@ -785,12 +813,12 @@ def render_external_rule_checker():
         return
 
     with st.spinner("正在按固定规则判定外部数据..."):
-        prepared_df, check_logs = prepare_rule_check_data(
+        prepared_df, check_logs = prepare_rule_check_data_cached(
             external_raw,
             use_full_preprocess=use_full_preprocess,
             auto_normalize=auto_normalize,
         )
-        result_df, external_rules, external_score_columns, total_possible_score = score_and_classify_rule_data(prepared_df)
+        result_df, external_rules, external_score_columns, total_possible_score = score_and_classify_rule_data_cached(prepared_df)
 
     if not external_rules:
         st.warning("未识别到可判定字段。请确认CSV列名与固定规则参数名一致。")
@@ -844,13 +872,15 @@ def main():
     with st.sidebar:
         st.markdown("### 📂 数据上传")
         uploaded_file = st.file_uploader("选择数据文件", type=["csv", "xlsx", "xls"])
+        if uploaded_file is not None:
+            st.caption(f"文件大小：{uploaded_file.size / 1024 / 1024:.2f} MB。大文件建议优先上传 CSV。")
 
         if uploaded_file is not None and st.button("🔄 加载并分析"):
             with st.spinner("正在处理数据..."):
                 df_raw = load_data(uploaded_file)
                 if df_raw is not None:
-                    df_processed, preprocess_logs = preprocess_data(df_raw)
-                    df_scored, score_columns, total_possible_score, scoring_rules = score_dataset(df_processed)
+                    df_processed, preprocess_logs = preprocess_data_cached(df_raw)
+                    df_scored, score_columns, total_possible_score, scoring_rules = score_dataset_cached(df_processed)
                     st.session_state.df_raw = df_raw
                     st.session_state.df_processed = df_processed
                     st.session_state.df_scored = df_scored
