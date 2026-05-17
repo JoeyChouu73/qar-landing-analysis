@@ -20,8 +20,14 @@ CHINESE_FONT_CANDIDATES = [
     "PingFang SC",
     "Hiragino Sans GB",
     "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK TC",
+    "Noto Sans CJK HK",
+    "Noto Serif CJK SC",
+    "Noto Serif CJK JP",
     "Source Han Sans CN",
     "WenQuanYi Zen Hei",
+    "WenQuanYi Micro Hei",
     "Arial Unicode MS",
     "STHeiti",
     "Songti SC",
@@ -29,10 +35,24 @@ CHINESE_FONT_CANDIDATES = [
 
 
 def detect_chinese_font():
+    try:
+        font_manager.fontManager = font_manager._load_fontmanager(try_read_cache=False)
+    except Exception:
+        pass
+
     available_fonts = {f.name for f in font_manager.fontManager.ttflist}
     for font_name in CHINESE_FONT_CANDIDATES:
         if font_name in available_fonts:
             return font_name
+
+    for font_path in font_manager.findSystemFonts(fontext="ttf") + font_manager.findSystemFonts(fontext="otf"):
+        try:
+            font_name = font_manager.FontProperties(fname=font_path).get_name()
+        except Exception:
+            continue
+        if any(keyword in font_name for keyword in ["Noto Sans CJK", "Noto Serif CJK", "WenQuanYi", "Source Han"]):
+            return font_name
+
     return "DejaVu Sans"
 
 
