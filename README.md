@@ -54,6 +54,8 @@ streamlit run tt.py --server.address 0.0.0.0 --server.port 8501
 
 部署完成后，所有人都可以通过生成的网址上传自己的数据文件并分析。上传的数据只保存在当前会话内，不会写入项目文件。
 
+注意：`packages.txt` 用于让 Streamlit Cloud 安装中文字体，避免图表中的中文显示为空白或方框。上传 GitHub 时请一并上传。
+
 ## 数据字段要求
 
 完整分析建议数据文件包含原始 QAR 字段，例如：
