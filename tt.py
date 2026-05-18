@@ -231,7 +231,13 @@ def load_data(uploaded_file):
     file_name = getattr(uploaded_file, "name", "")
 
     try:
-        return load_data_from_bytes(uploaded_file.getvalue(), file_name)
+        if hasattr(uploaded_file, "getvalue"):
+            file_bytes = uploaded_file.getvalue()
+        else:
+            file_bytes = uploaded_file.read()
+            if hasattr(uploaded_file, "seek"):
+                uploaded_file.seek(0)
+        return load_data_from_bytes(file_bytes, file_name)
     except Exception as exc:
         st.error(f"文件读取失败：{exc}")
         st.info("请确认文件格式为 CSV、XLSX 或 XLS；CSV 建议使用 GBK 或 UTF-8 编码。")
@@ -524,6 +530,205 @@ def create_score_corr_heatmap(df_scored, score_columns):
     ax.set_title("各参数得分相关性热图", fontsize=14, fontweight="bold")
     ax.tick_params(axis="x", rotation=45)
     fig.tight_layout()
+    return fig
+
+
+def get_ordered_analysis_params(df_scored, scoring_rules):
+    ordered = [param for param in ORDERED_PARAMS if param in scoring_rules and param in df_scored.columns]
+    remaining = [param for param in scoring_rules if param in df_scored.columns and param not in ordered]
+    return ordered + remaining
+
+
+@st.cache_data(show_spinner=False)
+def build_parameter_risk_summary(df_scored, scoring_rules):
+    rows = []
+    params = get_ordered_analysis_params(df_scored, scoring_rules)
+
+    for param in params:
+        rule = scoring_rules[param]
+        score_col = f"{param}_得分"
+        if score_col not in df_scored.columns:
+            continue
+
+        values = pd.to_numeric(df_scored[param], errors="coerce")
+        scores = pd.to_numeric(df_scored[score_col], errors="coerce")
+        zones = values.apply(lambda x: classify_zone(x, rule))
+        valid_count = int(values.notna().sum())
+        total_count = len(df_scored)
+        green_count = int((zones == "绿色").sum())
+        blue_count = int((zones == "蓝色").sum())
+        orange_count = int((zones == "橙色").sum())
+        missing_count = int((zones == "缺失").sum())
+        low_score_count = int((scores < rule["weight"] * 0.6).sum())
+
+        rows.append(
+            {
+                "参数": param,
+                "权重": rule["weight"],
+                "有效记录数": valid_count,
+                "实际均值": round(values.mean(), 2) if valid_count else np.nan,
+                "实际标准差": round(values.std(), 2) if valid_count > 1 else 0,
+                "实际最小值": round(values.min(), 2) if valid_count else np.nan,
+                "实际最大值": round(values.max(), 2) if valid_count else np.nan,
+                "平均得分": round(scores.mean(), 2),
+                "平均得分率": round(scores.mean() / rule["weight"] * 100, 1) if rule["weight"] else 0,
+                "绿色占比": round(green_count / total_count * 100, 1) if total_count else 0,
+                "蓝色占比": round(blue_count / total_count * 100, 1) if total_count else 0,
+                "橙色占比": round(orange_count / total_count * 100, 1) if total_count else 0,
+                "缺失占比": round(missing_count / total_count * 100, 1) if total_count else 0,
+                "低得分占比": round(low_score_count / total_count * 100, 1) if total_count else 0,
+                "加权风险指数": round(orange_count / total_count * rule["weight"], 2) if total_count else 0,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["加权风险指数", "橙色占比"], ascending=False).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def build_airport_risk_summary(df_scored, scoring_rules):
+    if "着陆机场" not in df_scored.columns:
+        return pd.DataFrame()
+
+    params = get_ordered_analysis_params(df_scored, scoring_rules)
+    if not params:
+        return pd.DataFrame()
+
+    zone_df = pd.DataFrame(index=df_scored.index)
+    for param in params:
+        zone_df[param] = df_scored[param].apply(lambda x: classify_zone(x, scoring_rules[param]))
+
+    rows = []
+    for airport, group in df_scored.groupby("着陆机场", dropna=False):
+        idx = group.index
+        airport_zones = zone_df.loc[idx]
+        orange_counts = (airport_zones == "橙色").sum()
+        total_param_count = len(group) * len(params)
+        orange_total = int(orange_counts.sum())
+        main_risk_param = orange_counts.sort_values(ascending=False).index[0] if orange_total > 0 else "-"
+
+        rows.append(
+            {
+                "着陆机场": str(airport),
+                "航班数": int(len(group)),
+                "平均总分": round(group["总分"].mean(), 2),
+                "总分中位数": round(group["总分"].median(), 2),
+                "总分标准差": round(group["总分"].std(), 2) if len(group) > 1 else 0,
+                "橙色参数次数": orange_total,
+                "橙色参数占比": round(orange_total / total_param_count * 100, 1) if total_param_count else 0,
+                "主要风险参数": main_risk_param,
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values(["橙色参数占比", "航班数"], ascending=[False, False]).reset_index(drop=True)
+
+
+def create_airport_risk_figure(airport_summary):
+    if airport_summary.empty:
+        return None
+
+    plot_df = airport_summary.sort_values("航班数", ascending=False).head(20).sort_values("橙色参数占比", ascending=True)
+    fig = make_subplots(
+        rows=1,
+        cols=3,
+        subplot_titles=("航班数量", "平均总分", "橙色参数占比"),
+        horizontal_spacing=0.08,
+    )
+    fig.add_trace(go.Bar(y=plot_df["着陆机场"], x=plot_df["航班数"], orientation="h", marker_color="#6C8EBF", name="航班数"), row=1, col=1)
+    fig.add_trace(go.Bar(y=plot_df["着陆机场"], x=plot_df["平均总分"], orientation="h", marker_color="#2E8B57", name="平均总分"), row=1, col=2)
+    fig.add_trace(go.Bar(y=plot_df["着陆机场"], x=plot_df["橙色参数占比"], orientation="h", marker_color="#FF671F", name="橙色参数占比"), row=1, col=3)
+    fig.update_layout(
+        title="机场维度风险概览（按航班数前20个机场展示）",
+        height=max(480, 28 * len(plot_df) + 180),
+        showlegend=False,
+        font=dict(family=PLOTLY_FONT_FAMILY),
+        margin=dict(l=20, r=20, t=70, b=40),
+    )
+    fig.update_xaxes(title_text="航班数", row=1, col=1)
+    fig.update_xaxes(title_text="分", row=1, col=2)
+    fig.update_xaxes(title_text="%", row=1, col=3)
+    return fig
+
+
+def create_parameter_zone_stacked_bar(param_summary):
+    if param_summary.empty:
+        return None
+
+    plot_df = param_summary.sort_values("橙色占比", ascending=True)
+    fig = go.Figure()
+    zone_specs = [
+        ("绿色占比", "#2E8B57"),
+        ("蓝色占比", "#0033A0"),
+        ("橙色占比", "#FF671F"),
+        ("缺失占比", "#A0A0A0"),
+    ]
+    for col, color in zone_specs:
+        fig.add_trace(go.Bar(y=plot_df["参数"], x=plot_df[col], orientation="h", name=col.replace("占比", ""), marker_color=color))
+
+    fig.update_layout(
+        title="22个参数区间占比对比",
+        barmode="stack",
+        height=max(620, 25 * len(plot_df) + 180),
+        xaxis_title="占比（%）",
+        yaxis_title="参数",
+        font=dict(family=PLOTLY_FONT_FAMILY),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=90, b=40),
+    )
+    return fig
+
+
+def create_parameter_histogram_grid(df_scored, scoring_rules, value_type="actual"):
+    params = get_ordered_analysis_params(df_scored, scoring_rules)
+    if not params:
+        return None
+
+    cols = 3
+    rows = int(np.ceil(len(params) / cols))
+    title = "22个参数实际数值分布" if value_type == "actual" else "22个参数得分分布"
+    fig = make_subplots(rows=rows, cols=cols, subplot_titles=params, vertical_spacing=0.06, horizontal_spacing=0.05)
+
+    for i, param in enumerate(params):
+        row = i // cols + 1
+        col = i % cols + 1
+        rule = scoring_rules[param]
+
+        if value_type == "actual":
+            series = pd.to_numeric(df_scored[param], errors="coerce").dropna()
+            color = "#6C8EBF"
+            xaxis_title = "实际值"
+        else:
+            score_col = f"{param}_得分"
+            if score_col not in df_scored.columns:
+                continue
+            series = pd.to_numeric(df_scored[score_col], errors="coerce").dropna()
+            color = "#2E8B57"
+            xaxis_title = "得分"
+
+        fig.add_trace(
+            go.Histogram(x=series, nbinsx=24, marker_color=color, opacity=0.82, showlegend=False),
+            row=row,
+            col=col,
+        )
+
+        if value_type == "actual":
+            green_lower, green_upper = rule["green"]
+            if green_lower is not None:
+                fig.add_vline(x=green_lower, line_width=1.4, line_dash="dash", line_color="#2E8B57", row=row, col=col)
+            if green_upper is not None:
+                fig.add_vline(x=green_upper, line_width=1.4, line_dash="dash", line_color="#2E8B57", row=row, col=col)
+
+        fig.update_xaxes(title_text=xaxis_title, row=row, col=col)
+        fig.update_yaxes(title_text="频数", row=row, col=col)
+
+    fig.update_layout(
+        title=title,
+        height=max(720, rows * 285),
+        bargap=0.05,
+        font=dict(family=PLOTLY_FONT_FAMILY),
+        margin=dict(l=20, r=20, t=90, b=40),
+    )
     return fig
 
 
@@ -945,6 +1150,37 @@ def main():
         st.markdown("### 评分结果预览")
         preview_columns = [col for col in ["FILENAME", "日期", "着陆操纵者", "所属大队", "技术等级", "总分"] if col in df_scored.columns]
         st.dataframe(df_scored[preview_columns + score_columns].head(300), use_container_width=True)
+
+        st.markdown("### 全航班共性风险与问题分析")
+        param_summary = build_parameter_risk_summary(df_scored, scoring_rules)
+        airport_summary = build_airport_risk_summary(df_scored, scoring_rules)
+
+        if not airport_summary.empty:
+            st.markdown("#### 机场分析")
+            airport_fig = create_airport_risk_figure(airport_summary)
+            if airport_fig is not None:
+                st.plotly_chart(airport_fig, use_container_width=True)
+            st.dataframe(airport_summary.head(100), use_container_width=True, hide_index=True)
+        else:
+            st.info("数据中缺少“着陆机场”字段，无法生成机场分析。")
+
+        if not param_summary.empty:
+            st.markdown("#### 参数风险汇总")
+            st.dataframe(param_summary, use_container_width=True, hide_index=True)
+
+            zone_fig = create_parameter_zone_stacked_bar(param_summary)
+            if zone_fig is not None:
+                st.plotly_chart(zone_fig, use_container_width=True)
+
+            actual_dist_fig = create_parameter_histogram_grid(df_scored, scoring_rules, value_type="actual")
+            if actual_dist_fig is not None:
+                st.plotly_chart(actual_dist_fig, use_container_width=True)
+
+            score_dist_fig = create_parameter_histogram_grid(df_scored, scoring_rules, value_type="score")
+            if score_dist_fig is not None:
+                st.plotly_chart(score_dist_fig, use_container_width=True)
+        else:
+            st.info("当前数据没有可用于参数风险分析的评分字段。")
 
     with tab3:
         st.markdown("### 按大队统计")
